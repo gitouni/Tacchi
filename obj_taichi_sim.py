@@ -4,28 +4,29 @@ import numpy as np
 import os
 # import sys
 import argparse
+import shutil
 
 def options():
     parser = argparse.ArgumentParser()
     io_parser = parser.add_argument_group()
-    io_parser.add_argument("--dataset_dir", type=str, default="tacchi_obj/obj_100")
-    io_parser.add_argument("--output_dir", type=str, default="results_te/posmap")
+    io_parser.add_argument("--dataset_dir", type=str, default="0_stl2npy/obj_100")
+    io_parser.add_argument("--output_dir", type=str, default="res/height")
     io_parser.add_argument("--depth_file",type=str,default="results_tr/depth.npy")
     io_parser.add_argument("--scale_file",type=str,default="results_tr/scale.npy")
     io_parser.add_argument("--rot_file",type=str,default="results_tr/rot.npy")
-    io_parser.add_argument("--index", type=int, default=18)
+    io_parser.add_argument("--index", type=int, default=9)
     io_parser.add_argument("--real_w",type=float,default=11.952,help="heigh of FOV image, unit:mm")
     io_parser.add_argument("--real_l",type=float,default=15.936,help="length of FOV image, unit:mm")
     io_parser.add_argument("--mmpp",type=float, default=0.0249, help="mm per pixel")
     run_parser = parser.add_argument_group()
-    run_parser.add_argument("--max_height",type=str,default=8)
-    run_parser.add_argument("--num_l", type=int, default=100)
-    run_parser.add_argument("--num_w", type=int, default=100)
+    run_parser.add_argument("--max_height",type=str,default=5)
+    run_parser.add_argument("--num_l", type=int, default=200)
+    run_parser.add_argument("--num_w", type=int, default=200)
     run_parser.add_argument("--num_h",type=int,default=20)
-    run_parser.add_argument("--scale_adjust",type=float,default=0.8)
+    run_parser.add_argument("--scale_adjust",type=float,default=1.0)
     run_parser.add_argument("--x", type=int, default=0)
     run_parser.add_argument("--y", type=int, default=0)
-    run_parser.add_argument("--gui",action="store_true",default=False)
+    run_parser.add_argument("--gui",action="store_true",default=True)
     return parser.parse_args()
 
 
@@ -156,9 +157,9 @@ def substep():
         
 if __name__ == "__main__":
     args = options()
-    if not os.path.isdir(args.output_dir):
-        raise RuntimeError("{} should be created beforehand.".format(args.output_dir))
-    # os.makedirs(args.output_dir,exist_ok=True)
+    if os.path.exists(args.output_dir):
+        shutil.rmtree(args.output_dir)
+    os.makedirs(args.output_dir,exist_ok=True)
     
     # taichi initialization
     ti.init(arch=ti.gpu)
@@ -176,9 +177,9 @@ if __name__ == "__main__":
     dis = l/(num_l-1)
 
     dataset = TacchiDataset(args.dataset_dir)
-    depth_list = np.load(args.depth_file)
-    rot_list = np.load(args.rot_file)
-    scale_list = np.load(args.scale_file)
+    # depth_list = np.load(args.depth_file)
+    # rot_list = np.load(args.rot_file)
+    # scale_list = np.load(args.scale_file)
     # world initialization
     t_ti = ti.field(dtype=ti.f32, shape=())
     t_ti[None] = 0
@@ -192,8 +193,8 @@ if __name__ == "__main__":
         n_grid, n_grid, n_grid))  # grid node momentum/velocity
     grid_m = ti.field(dtype=float, shape=(
         n_grid, n_grid, n_grid))  # grid node mass
-    data = dataset.getitem(args.index % len(dataset), rot_list[args.index], args.scale_adjust*scale_list[args.index])
-    max_depth = depth_list[args.index]
+    data = dataset.getitem(args.index % len(dataset), [0,0,0], args.scale_adjust)
+    max_depth = 1.0
     # max_depth = 0.6
     data = data.astype(np.float32)
     # particle initialization
@@ -223,22 +224,34 @@ if __name__ == "__main__":
         gui = ti.GUI("Explicit MPM rotate", res=400, background_color=0x112F41)
         colors = np.array([0x808080, 0x00ff00, 0xEEEEF0], dtype=np.uint32)
     # step sim
+    p_xpos_list, p_ypos_list, p_zpos_list = get_last_layer_pose()
+    np.savez(os.path.join(args.output_dir, "{:04d}.npz".format(int(t_ti[None]))), \
+                        p_xpos=p_xpos_list,
+                        p_ypos=p_ypos_list,
+                        p_zpos=np.zeros_like(p_zpos_list))
     while True:
         t_ti[None] += 1
         p_xpos_list, p_ypos_list, p_zpos_list = get_last_layer_pose()
         depth = np.min(p_zpos_list)  # 12 for intialization
         substep()
+        if (depth-init_z_min) < 0:
+            if t_ti[None] % 10 == 0:
+                delta_zpos_list = (p_zpos_list - init_p_zpos_list).reshape(num_l, num_w).astype(np.float32)
+                np.savez(os.path.join(args.output_dir, "{:04d}.npz".format(int(t_ti[None]))), \
+                        p_xpos=p_xpos_list,
+                        p_ypos=p_ypos_list,
+                        p_zpos=delta_zpos_list)
         if (depth-init_z_min) < 0.01 - max_depth:
-            delta_xpos_list = (p_xpos_list - init_p_xpos_list).reshape(num_l, num_w).astype(np.float32)
-            delta_ypos_list = (p_ypos_list - init_p_ypos_list).reshape(num_l, num_w).astype(np.float32)
-            delta_zpos_list = (p_zpos_list - init_p_zpos_list).reshape(num_l, num_w).astype(np.float32)
-            np.savez(os.path.join(args.output_dir, "{:04d}.npz".format(args.index)), \
-                p_xpos=p_xpos_list,
-                p_ypos=p_ypos_list,
-                p_zpos=p_zpos_list,
-                p_dxpos=np.flipud(np.fliplr(-delta_xpos_list)),
-                p_dypos=np.flipud(np.fliplr(-delta_ypos_list)),
-                p_dzpos=np.flipud(np.fliplr(-delta_zpos_list)))  # flip the gelsight image and inverte delta (because the reverse of x and y direction)
+            # delta_xpos_list = (p_xpos_list - init_p_xpos_list).reshape(num_l, num_w).astype(np.float32)
+            # delta_ypos_list = (p_ypos_list - init_p_ypos_list).reshape(num_l, num_w).astype(np.float32)
+            # delta_zpos_list = (p_zpos_list - init_p_zpos_list).reshape(num_l, num_w).astype(np.float32)
+            # np.savez(os.path.join(args.output_dir, "{:04d}.npz".format(args.index)), \
+            #     p_xpos=p_xpos_list,
+            #     p_ypos=p_ypos_list,
+            #     p_zpos=p_zpos_list,
+            #     p_dxpos=np.flipud(np.fliplr(-delta_xpos_list)),
+            #     p_dypos=np.flipud(np.fliplr(-delta_ypos_list)),
+            #     p_dzpos=np.flipud(np.fliplr(-delta_zpos_list)))  # flip the gelsight image and inverte delta (because the reverse of x and y direction)
             break
         if args.gui:
             gui.circles(x_2d.to_numpy()/100, radius=1, color=colors[material.to_numpy()])

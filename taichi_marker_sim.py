@@ -1,31 +1,28 @@
-from dataset import TacchiDataset
+from math import fabs
 import taichi as ti
 import numpy as np
 import os
-# import sys
+import sys
 import argparse
 
 def options():
     parser = argparse.ArgumentParser()
     io_parser = parser.add_argument_group()
-    io_parser.add_argument("--dataset_dir", type=str, default="tacchi_obj/obj_100")
-    io_parser.add_argument("--output_dir", type=str, default="results_te/posmap")
-    io_parser.add_argument("--depth_file",type=str,default="results_tr/depth.npy")
-    io_parser.add_argument("--scale_file",type=str,default="results_tr/scale.npy")
-    io_parser.add_argument("--rot_file",type=str,default="results_tr/rot.npy")
-    io_parser.add_argument("--index", type=int, default=18)
+    io_parser.add_argument("--height_dir", type=str, default="rand_height")
+    io_parser.add_argument("--output_dir", type=str, default="rand_pos_taichi")
+    io_parser.add_argument("--index", type=int, default=0)
     io_parser.add_argument("--real_w",type=float,default=11.952,help="heigh of FOV image, unit:mm")
     io_parser.add_argument("--real_l",type=float,default=15.936,help="length of FOV image, unit:mm")
     io_parser.add_argument("--mmpp",type=float, default=0.0249, help="mm per pixel")
     run_parser = parser.add_argument_group()
-    run_parser.add_argument("--max_height",type=str,default=8)
     run_parser.add_argument("--num_l", type=int, default=100)
     run_parser.add_argument("--num_w", type=int, default=100)
     run_parser.add_argument("--num_h",type=int,default=20)
-    run_parser.add_argument("--scale_adjust",type=float,default=0.8)
+    run_parser.add_argument("--max_height",type=float,default=6)
+    run_parser.add_argument("--min_height", type=float, default=0.2)
     run_parser.add_argument("--x", type=int, default=0)
     run_parser.add_argument("--y", type=int, default=0)
-    run_parser.add_argument("--gui",action="store_true",default=False)
+    run_parser.add_argument("--gui",action="store_true",default=True)
     return parser.parse_args()
 
 
@@ -174,11 +171,9 @@ if __name__ == "__main__":
     h = 4
 
     dis = l/(num_l-1)
+    lefttop = np.array([l - args.real_l, w - args.real_w]) / 2  # (x,y)
 
-    dataset = TacchiDataset(args.dataset_dir)
-    depth_list = np.load(args.depth_file)
-    rot_list = np.load(args.rot_file)
-    scale_list = np.load(args.scale_file)
+    height_files = list(sorted(os.listdir(args.height_dir)))
     # world initialization
     t_ti = ti.field(dtype=ti.f32, shape=())
     t_ti[None] = 0
@@ -192,10 +187,22 @@ if __name__ == "__main__":
         n_grid, n_grid, n_grid))  # grid node momentum/velocity
     grid_m = ti.field(dtype=float, shape=(
         n_grid, n_grid, n_grid))  # grid node mass
-    data = dataset.getitem(args.index % len(dataset), rot_list[args.index], args.scale_adjust*scale_list[args.index])
-    max_depth = depth_list[args.index]
-    # max_depth = 0.6
-    data = data.astype(np.float32)
+    data_img = np.load(os.path.join(args.height_dir, height_files[args.index]))
+    # data_img -= np.min(data_img)
+    data_img[data_img < args.min_height] = 0
+    y_coord, x_coord = np.nonzero(data_img)
+    if len(y_coord) == 0:  # no data to be simulated
+        np.savez(os.path.join(args.output_dir, "{:04d}.npz".format(args.index)), \
+                    p_xpos_list=np.zeros((num_w, num_l), dtype=np.float32),
+                    p_ypos_list=np.zeros((num_w, num_l), dtype=np.float32),
+                    lefttop=lefttop)
+        print("Index:{} steps: {} particles:{}".format(args.index, t_ti[None], 0))
+        sys.exit(0)
+    z_coord = data_img[y_coord, x_coord]
+    maximim_height = np.max(data_img)
+    y_coord = np.array(y_coord - data_img.shape[0]/2) * args.mmpp
+    x_coord = np.array(x_coord - data_img.shape[1]/2) * args.mmpp
+    data = np.stack((x_coord, y_coord, z_coord), axis=1).astype(np.float32)  # (N, 3)
     # particle initialization
     n_particles = num_l*num_w*num_h+np.shape(data)[0]
     x = ti.Vector.field(3, dtype=float, shape=n_particles)  # position
@@ -228,20 +235,17 @@ if __name__ == "__main__":
         p_xpos_list, p_ypos_list, p_zpos_list = get_last_layer_pose()
         depth = np.min(p_zpos_list)  # 12 for intialization
         substep()
-        if (depth-init_z_min) < 0.01 - max_depth:
+        if (depth-init_z_min) < 1e-2-maximim_height:
             delta_xpos_list = (p_xpos_list - init_p_xpos_list).reshape(num_l, num_w).astype(np.float32)
             delta_ypos_list = (p_ypos_list - init_p_ypos_list).reshape(num_l, num_w).astype(np.float32)
-            delta_zpos_list = (p_zpos_list - init_p_zpos_list).reshape(num_l, num_w).astype(np.float32)
+            delta_zpos_list = p_zpos_list - init_p_zpos_list
             np.savez(os.path.join(args.output_dir, "{:04d}.npz".format(args.index)), \
-                p_xpos=p_xpos_list,
-                p_ypos=p_ypos_list,
-                p_zpos=p_zpos_list,
-                p_dxpos=np.flipud(np.fliplr(-delta_xpos_list)),
-                p_dypos=np.flipud(np.fliplr(-delta_ypos_list)),
-                p_dzpos=np.flipud(np.fliplr(-delta_zpos_list)))  # flip the gelsight image and inverte delta (because the reverse of x and y direction)
+                p_xpos_list=np.flipud(np.fliplr(-delta_xpos_list)),
+                p_ypos_list=np.flipud(np.fliplr(-delta_ypos_list)),
+                lefttop=lefttop)  # flip the gelsight image and inverte delta (because the reverse of x and y direction)
             break
         if args.gui:
             gui.circles(x_2d.to_numpy()/100, radius=1, color=colors[material.to_numpy()])
             gui.show()
-    print("Index:{} steps: {} particles:{} max_depth:{}".format(args.index, t_ti[None], data.shape[0], max_depth))
+    print("Index:{} steps: {} particles:{}".format(args.index, t_ti[None], data.shape[0]))
         

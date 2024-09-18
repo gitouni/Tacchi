@@ -1,0 +1,25 @@
+batch_size: &batch_size 1
+DEVICE: &device cuda
+model_args:
+  depth: 3
+  width: 128
+  device: *device
+  m: 9
+  k0: -8  # -m + 1
+  nonrigidity_est: false
+  rotation_format: axis_angle
+  motion: SE3
+register_args:
+  lr: 0.005
+  iters: 500
+  max_break_count: 15
+  break_threshold_ratio: 0.0002
+  w_reg: 0
+
+
+
+
+
+
+
+

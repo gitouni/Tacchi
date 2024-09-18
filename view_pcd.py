@@ -43,8 +43,12 @@ def color_pcd(pcd):
     return pcd
 
 if __name__ == "__main__":
-    pcd_path = "0_stl2npy/pcd/sphere.pcd"
-    pcd = o3d.io.read_point_cloud(pcd_path)
+    pcd_path = "0_stl2npy/obj_100/cross_lines.npy"
+    if os.path.splitext(pcd_path)[1] == '.pcd':
+        pcd = o3d.io.read_point_cloud(pcd_path)
+    else:
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(np.load(pcd_path))
     pcd = pcd.remove_statistical_outlier(nb_neighbors=20,std_ratio=2.0)[0]
     # pose_graph = o3d.io.read_pose_graph("/data2/ROS/ex_calib/res/building_rot4/ransac_optimized_defined.json")
     # invpose = np.linalg.inv(pose_graph.nodes[32].pose)
